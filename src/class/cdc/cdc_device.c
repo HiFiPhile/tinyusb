@@ -480,4 +480,37 @@ bool cdcd_xfer_cb(uint8_t rhport, uint8_t ep_addr, xfer_result_t result, uint32_
   return true;
 }
 
+// Get the Receive buffer infomation (for DMA transfer)
+void tud_cdc_n_get_read_buffer (uint8_t itf, tu_fifo_buffer_info_t * info)
+{
+  tu_fifo_get_read_info(&_cdcd_itf[itf].rx_ff, info);
+}
+
+// Get the transmit buffer infomation (for DMA transfer)
+void tud_cdc_n_get_write_buffer (uint8_t itf, tu_fifo_buffer_info_t * info)
+{
+  tu_fifo_get_write_info(&_cdcd_itf[itf].tx_ff, info);
+}
+
+// Need to be called when buffer read is finished, in order to schedule next transfer
+void tud_cdc_n_read_buffer_done (uint8_t itf, uint32_t readsize)
+{
+  cdcd_interface_t* p_cdc = &_cdcd_itf[itf];
+  tu_fifo_advance_read_pointer(&p_cdc->rx_ff, readsize);
+  _prep_out_transaction(p_cdc);
+}
+
+// Need to be called when buffer write is finished
+void tud_cdc_n_write_buffer_done (uint8_t itf, uint32_t writesize)
+{
+  cdcd_interface_t* p_cdc = &_cdcd_itf[itf];
+  tu_fifo_advance_write_pointer(&p_cdc->tx_ff, writesize);
+
+   // flush if queue more than packet size
+  if ( tu_fifo_count(&p_cdc->tx_ff) >= BULK_PACKET_SIZE )
+  {
+    tud_cdc_n_write_flush(itf);
+  }
+}
+
 #endif
