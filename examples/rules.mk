@@ -66,6 +66,10 @@ ifeq ($(NO_LTO),1)
 CFLAGS := $(filter-out -flto,$(CFLAGS))
 endif
 
+ifneq ($(CFLAGS_SKIP),)
+CFLAGS := $(filter-out $(CFLAGS_SKIP),$(CFLAGS))
+endif
+
 LDFLAGS += $(CFLAGS) -Wl,-Map=$@.map -Wl,-cref -Wl,-gc-sections
 
 ifdef LD_FILE
@@ -112,7 +116,7 @@ OBJ_DIRS = $(sort $(dir $(OBJ)))
 $(OBJ): | $(OBJ_DIRS)
 $(OBJ_DIRS):
 ifeq ($(CMDEXE),1)
-	@$(MKDIR) $(subst /,\,$@)
+	-@$(MKDIR) $(subst /,\,$@)
 else
 	@$(MKDIR) -p $@
 endif
@@ -139,7 +143,21 @@ $(BUILD)/obj/%_asm.o: %.S
 	@echo AS $(notdir $@)
 	@$(AS) $(ASFLAGS) -c -o $@ $<
 
-ifndef USE_IAR
+ifdef USE_IAR
+# IAR Compiler
+$(BUILD)/$(PROJECT).bin: $(BUILD)/$(PROJECT).elf
+	@echo CREATE $@
+	@$(OBJCOPY) --silent --bin $^ $@
+
+$(BUILD)/$(PROJECT).hex: $(BUILD)/$(PROJECT).elf
+	@echo CREATE $@
+	@$(OBJCOPY) --silent --ihex $^ $@
+
+$(BUILD)/$(PROJECT).elf: $(OBJ)
+	@echo LINK $@
+	@$(LD) -o $@ $(IAR_LDFLAGS) $^
+
+else
 # GCC based compiler
 $(BUILD)/$(PROJECT).bin: $(BUILD)/$(PROJECT).elf
 	@echo CREATE $@
@@ -153,20 +171,6 @@ $(BUILD)/$(PROJECT).elf: $(OBJ)
 	@echo LINK $@
 	@$(LD) -o $@ $(LDFLAGS) $^ -Wl,--start-group $(LIBS) -Wl,--end-group
 
-else
-
-# IAR Compiler
-$(BUILD)/$(PROJECT).bin: $(BUILD)/$(PROJECT).elf
-	@echo CREATE $@
-	@$(OBJCOPY) --silent --bin $^ $@
-
-$(BUILD)/$(PROJECT).hex: $(BUILD)/$(PROJECT).elf
-	@echo CREATE $@
-	@$(OBJCOPY) --silent --ihex $^ $@
-
-$(BUILD)/$(PROJECT).elf: $(OBJ)
-	@echo LINK $@
-	@$(LD) -o $@ $(IAR_LDFLAGS) $^
 endif
 
 # UF2 generation, iMXRT need to strip to text only before conversion
@@ -192,10 +196,9 @@ endif
 # get depenecies
 .PHONY: get-deps
 get-deps:
-  ifdef DEPS_SUBMODULES
-	git -C $(TOP) submodule update --init $(DEPS_SUBMODULES)
-  endif
+	$(PYTHON) $(TOP)/tools/get_deps.py $(DEPS_SUBMODULES)
 
+.PHONY: size
 size: $(BUILD)/$(PROJECT).elf
 	-@echo ''
 	@$(SIZE) $<
@@ -265,7 +268,11 @@ debug-bmp: $(BUILD)/$(PROJECT).elf
 
 # Create binary directory
 $(BIN):
+ifeq ($(CMDEXE),1)
+	@$(MKDIR) $(subst /,\,$@)
+else
 	@$(MKDIR) -p $@
+endif
 
 # Copy binaries .elf, .bin, .hex, .uf2 to BIN for upload
 # due to large size of combined artifacts, only uf2 is uploaded for now

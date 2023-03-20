@@ -52,6 +52,7 @@ SRC_C += \
 	$(ST_CMSIS)/Source/Templates/system_stm32$(ST_FAMILY)xx.c \
 	$(ST_HAL_DRIVER)/Src/stm32$(ST_FAMILY)xx_hal.c \
 	$(ST_HAL_DRIVER)/Src/stm32$(ST_FAMILY)xx_hal_cortex.c \
+	$(ST_HAL_DRIVER)/Src/stm32$(ST_FAMILY)xx_hal_dma.c \
 	$(ST_HAL_DRIVER)/Src/stm32$(ST_FAMILY)xx_hal_rcc.c \
 	$(ST_HAL_DRIVER)/Src/stm32$(ST_FAMILY)xx_hal_rcc_ex.c \
 	$(ST_HAL_DRIVER)/Src/stm32$(ST_FAMILY)xx_hal_gpio.c \
@@ -65,4 +66,4 @@ INC += \
 	$(TOP)/$(ST_HAL_DRIVER)/Inc
 
 # For freeRTOS port source
-FREERTOS_PORT = ARM_CM7/r0p1
+FREERTOS_PORTABLE_SRC = $(FREERTOS_PORTABLE_PATH)/ARM_CM7/r0p1

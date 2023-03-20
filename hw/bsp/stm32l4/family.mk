@@ -39,12 +39,14 @@ SRC_C += \
 	$(ST_CMSIS)/Source/Templates/system_stm32$(ST_FAMILY)xx.c \
 	$(ST_HAL_DRIVER)/Src/stm32$(ST_FAMILY)xx_hal.c \
 	$(ST_HAL_DRIVER)/Src/stm32$(ST_FAMILY)xx_hal_cortex.c \
+	$(ST_HAL_DRIVER)/Src/stm32$(ST_FAMILY)xx_hal_dma.c \
 	$(ST_HAL_DRIVER)/Src/stm32$(ST_FAMILY)xx_hal_rcc.c \
 	$(ST_HAL_DRIVER)/Src/stm32$(ST_FAMILY)xx_hal_rcc_ex.c \
 	$(ST_HAL_DRIVER)/Src/stm32$(ST_FAMILY)xx_hal_pwr.c \
 	$(ST_HAL_DRIVER)/Src/stm32$(ST_FAMILY)xx_hal_pwr_ex.c \
 	$(ST_HAL_DRIVER)/Src/stm32$(ST_FAMILY)xx_hal_gpio.c \
-	$(ST_HAL_DRIVER)/Src/stm32$(ST_FAMILY)xx_hal_uart.c
+	$(ST_HAL_DRIVER)/Src/stm32$(ST_FAMILY)xx_hal_uart.c \
+	$(ST_HAL_DRIVER)/Src/stm32$(ST_FAMILY)xx_hal_uart_ex.c
 
 INC += \
 	$(TOP)/lib/CMSIS_5/CMSIS/Core/Include \
@@ -53,7 +55,7 @@ INC += \
 	$(TOP)/$(BOARD_PATH)
 
 # For freeRTOS port source
-FREERTOS_PORT = ARM_CM4F
+FREERTOS_PORTABLE_SRC = $(FREERTOS_PORTABLE_PATH)/ARM_CM4F
 
 # flash target using on-board stlink
 flash: flash-stlink

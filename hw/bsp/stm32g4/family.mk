@@ -12,7 +12,7 @@ include $(TOP)/$(BOARD_PATH)/board.mk
 # --------------
 CFLAGS += \
   -DCFG_TUSB_MCU=OPT_MCU_STM32G4
-  
+
 # GCC Flags
 GCC_CFLAGS += \
   -flto \
@@ -43,6 +43,7 @@ SRC_C += \
 	$(ST_HAL_DRIVER)/Src/stm32$(ST_FAMILY)xx_hal_rcc.c \
 	$(ST_HAL_DRIVER)/Src/stm32$(ST_FAMILY)xx_hal_rcc_ex.c \
 	$(ST_HAL_DRIVER)/Src/stm32$(ST_FAMILY)xx_hal_uart.c \
+	$(ST_HAL_DRIVER)/Src/stm32$(ST_FAMILY)xx_hal_uart_ex.c \
 	$(ST_HAL_DRIVER)/Src/stm32$(ST_FAMILY)xx_hal_gpio.c
 
 INC += \
@@ -52,7 +53,7 @@ INC += \
 	$(TOP)/$(ST_HAL_DRIVER)/Inc
 
 # For freeRTOS port source
-FREERTOS_PORT = ARM_CM4F
+FREERTOS_PORTABLE_SRC = $(FREERTOS_PORTABLE_PATH)/ARM_CM4F
 
 # flash target using on-board stlink
 flash: flash-stlink
