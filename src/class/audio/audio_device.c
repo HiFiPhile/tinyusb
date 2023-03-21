@@ -312,7 +312,6 @@ typedef struct
 
 #if CFG_TUD_AUDIO_ENABLE_FEEDBACK_EP
   struct {
-    uint32_t value;       // Feedback value for asynchronous mode (in 16.16 format).
     uint32_t min_value;   // min value according to UAC2 FMT-2.0 section 2.3.1.1.
     uint32_t max_value;   // max value according to UAC2 FMT-2.0 section 2.3.1.1.
 
@@ -337,6 +336,7 @@ typedef struct
     }compute;
 
   } feedback;
+  CFG_TUSB_MEM_ALIGN uint32_t feedback_value; // Feedback value for asynchronous mode (in 16.16 format).
 #endif // CFG_TUD_AUDIO_ENABLE_FEEDBACK_EP
 
 #endif // CFG_TUD_AUDIO_ENABLE_EP_OUT
@@ -1078,7 +1078,7 @@ static uint16_t audiod_encode_type_I_pcm(uint8_t rhport, audiod_function_t* audi
 #if CFG_TUD_AUDIO_ENABLE_EP_OUT && CFG_TUD_AUDIO_ENABLE_FEEDBACK_EP
 static inline bool audiod_fb_send(uint8_t rhport, audiod_function_t *audio)
 {
-  return usbd_edpt_xfer(rhport, audio->ep_fb, (uint8_t *) &audio->feedback.value, 4);
+  return usbd_edpt_xfer(rhport, audio->ep_fb, (uint8_t *) &audio->feedback_value, 4);
 }
 #endif
 
@@ -2528,7 +2528,7 @@ bool tud_audio_n_fb_set(uint8_t func_id, uint32_t feedback)
 #if CFG_TUD_AUDIO_ENABLE_FEEDBACK_FORMAT_CORRECTION
   if ( TUSB_SPEED_FULL == tud_speed_get() )
   {
-    uint8_t * fb = (uint8_t *) &_audiod_fct[func_id].feedback.value;
+    uint8_t * fb = (uint8_t *) &_audiod_fct[func_id].feedback_value;
 
     // For FS format is 10.14
     *(fb++) = (feedback >> 2) & 0xFF;
@@ -2540,7 +2540,7 @@ bool tud_audio_n_fb_set(uint8_t func_id, uint32_t feedback)
 #else
   {
     // Send value as-is, caller will choose the appropriate format
-    _audiod_fct[func_id].feedback.value = feedback;
+    _audiod_fct[func_id].feedback_value = feedback;
   }
 #endif
 
