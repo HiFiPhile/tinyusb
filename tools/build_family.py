@@ -41,18 +41,18 @@ if __name__ == '__main__':
 
     # If examples are not specified in arguments, build all
     all_examples = []
-    for dir1 in os.scandir("examples"):
-        if dir1.is_dir():
-            for entry in os.scandir(dir1.path):
+    for d in os.scandir("examples"):
+        if d.is_dir() and 'cmake-build' not in d.name and 'cmake' not in d.name:
+            for entry in os.scandir(d.path):
                 if entry.is_dir():
-                    all_examples.append(dir1.name + '/' + entry.name)
+                    all_examples.append(d.name + '/' + entry.name)
     filter_with_input(all_examples)
     all_examples.sort()
 
     # If family are not specified in arguments, build all
     all_families = []
     for entry in os.scandir("hw/bsp"):
-        if entry.is_dir() and os.path.isdir(entry.path + "/boards") and entry.name not in ("esp32s2", "esp32s3"):
+        if entry.is_dir() and os.path.isdir(entry.path + "/boards") and entry.name != 'espressif':
             all_families.append(entry.name)
     filter_with_input(all_families)
     all_families.sort()
