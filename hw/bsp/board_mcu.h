@@ -44,10 +44,10 @@
       TU_CHECK_MCU(OPT_MCU_LPC40XX, OPT_MCU_LPC43XX)
   #include "chip.h"
 
-#elif TU_CHECK_MCU(OPT_MCU_LPC51UXX, OPT_MCU_LPC54XXX, OPT_MCU_LPC55XX)
+#elif TU_CHECK_MCU(OPT_MCU_LPC51UXX, OPT_MCU_LPC54XXX, OPT_MCU_LPC55XX, OPT_MCU_MCXN9)
   #include "fsl_device_registers.h"
 
-#elif TU_CHECK_MCU(OPT_MCU_KINETIS_KL, OPT_MCU_KINETIS_K32)
+#elif TU_CHECK_MCU(OPT_MCU_KINETIS_KL, OPT_MCU_KINETIS_K32L)
   #include "fsl_device_registers.h"
 
 #elif CFG_TUSB_MCU == OPT_MCU_NRF5X
@@ -101,6 +101,9 @@
 #elif CFG_TUSB_MCU == OPT_MCU_STM32U5
   #include "stm32u5xx.h"
 
+#elif CFG_TUSB_MCU == OPT_MCU_STM32G0
+  #include "stm32g0xx.h"
+
 #elif CFG_TUSB_MCU == OPT_MCU_CXD56
   // no header needed
 
@@ -113,7 +116,7 @@
 #elif CFG_TUSB_MCU == OPT_MCU_VALENTYUSB_EPTRI
   // no header needed
 
-#elif CFG_TUSB_MCU == OPT_MCU_MIMXRT
+#elif CFG_TUSB_MCU == OPT_MCU_MIMXRT1XXX
   #include "fsl_device_registers.h"
 
 #elif CFG_TUSB_MCU == OPT_MCU_NUC120

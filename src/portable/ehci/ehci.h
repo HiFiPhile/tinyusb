@@ -81,6 +81,8 @@ typedef union {
 	};
 }ehci_link_t;
 
+TU_VERIFY_STATIC( sizeof(ehci_link_t) == 4, "size is not correct" );
+
 /// Queue Element Transfer Descriptor
 /// Qtd is used to declare overlay in ehci_qhd_t -> cannot be declared with TU_ATTR_ALIGNED(32)
 typedef struct
@@ -162,11 +164,12 @@ typedef struct TU_ATTR_ALIGNED(32)
 	uint8_t pid;
 	uint8_t interval_ms; // polling interval in frames (or millisecond)
 
-	uint16_t total_xferred_bytes; // number of bytes xferred until a qtd with ioc bit set
-	uint8_t reserved2[2];
+	uint8_t TU_RESERVED[4];
 
-	ehci_qtd_t * volatile p_qtd_list_head;	// head of the scheduled TD list
-	ehci_qtd_t * volatile p_qtd_list_tail;	// tail of the scheduled TD list
+  // Attached TD management, note usbh will only queue 1 TD per QHD.
+  // buffer for dcache invalidate since td's buffer is modified by HC and finding initial buffer address is not trivial
+  uint32_t attached_buffer;
+	ehci_qtd_t * volatile attached_qtd;
 } ehci_qhd_t;
 
 TU_VERIFY_STATIC( sizeof(ehci_qhd_t) == 64, "size is not correct" );
@@ -245,14 +248,6 @@ typedef struct TU_ATTR_ALIGNED(32)
 	/// Word 4-5: Buffer Pointer List
 	uint32_t buffer[2];		// buffer[1] TP: Transaction Position - T-Count: Transaction Count
 
-// 	union{
-// 		uint32_t BufferPointer1;
-// 		struct  {
-// 			volatile uint32_t TCount : 3;
-// 			volatile uint32_t TPosition : 2;
-// 		};
-// 	};
-
 	/*---------- Word 6 ----------*/
 	ehci_link_t back;
 
@@ -268,6 +263,7 @@ TU_VERIFY_STATIC( sizeof(ehci_sitd_t) == 32, "size is not correct" );
 // EHCI Operational Register
 //--------------------------------------------------------------------+
 enum {
+  // Bit 0-5 has maskable in interrupt enabled register
   EHCI_INT_MASK_USB                   = TU_BIT(0),
   EHCI_INT_MASK_ERROR                 = TU_BIT(1),
   EHCI_INT_MASK_PORT_CHANGE           = TU_BIT(2),
@@ -276,23 +272,30 @@ enum {
   EHCI_INT_MASK_ASYNC_ADVANCE         = TU_BIT(5),
 
   EHCI_INT_MASK_NXP_SOF               = TU_BIT(7),
-  EHCI_INT_MASK_NXP_ASYNC             = TU_BIT(18),
-  EHCI_INT_MASK_NXP_PERIODIC          = TU_BIT(19),
+
+  EHCI_INT_MASK_HC_HALTED             = TU_BIT(12),
+  EHCI_INT_MASK_RECLAIMATION          = TU_BIT(13),
+  EHCI_INT_MASK_PERIODIC_SCHED_STATUS = TU_BIT(14),
+  EHCI_INT_MASK_ASYNC_SCHED_STATUS    = TU_BIT(15),
 
   EHCI_INT_MASK_ALL                   =
       EHCI_INT_MASK_USB | EHCI_INT_MASK_ERROR | EHCI_INT_MASK_PORT_CHANGE |
       EHCI_INT_MASK_FRAMELIST_ROLLOVER | EHCI_INT_MASK_PCI_HOST_SYSTEM_ERROR |
-      EHCI_INT_MASK_ASYNC_ADVANCE | EHCI_INT_MASK_NXP_SOF |
-      EHCI_INT_MASK_NXP_ASYNC | EHCI_INT_MASK_NXP_PERIODIC
+      EHCI_INT_MASK_ASYNC_ADVANCE | EHCI_INT_MASK_NXP_SOF
 };
 
 enum {
-  EHCI_USBCMD_POS_RUN_STOP               = 0,
-  EHCI_USBCMD_POS_FRAMELIST_SIZE         = 2,
-  EHCI_USBCMD_POS_PERIOD_ENABLE          = 4,
-  EHCI_USBCMD_POS_ASYNC_ENABLE           = 5,
-  EHCI_USBCMD_POS_NXP_FRAMELIST_SIZE_MSB = 15,
-  EHCI_USBCMD_POS_INTERRUPT_THRESHOLD    = 16
+  EHCI_USBCMD_FRAMELIST_SIZE_SHIFT              = 2, // [2..3]
+  EHCI_USBCMD_CHIPIDEA_FRAMELIST_SIZE_MSB_SHIFT = 15,
+  EHCI_USBCMD_INTERRUPT_THRESHOLD_SHIFT         = 16
+};
+
+enum {
+  EHCI_USBCMD_RUN_STOP                       = TU_BIT(0), // [0..0] 1 = Run, 0 = Stop
+  EHCI_USBCMD_HCRESET                        = TU_BIT(1), // [1..1] SW write 1 to reset HC, clear by HC when complete
+  EHCI_USBCMD_PERIOD_SCHEDULE_ENABLE         = TU_BIT(4), // [4..4] Enable periodic schedule
+  EHCI_USBCMD_ASYNC_SCHEDULE_ENABLE          = TU_BIT(5), // [5..5] Enable async schedule
+  EHCI_USBCMD_INTR_ON_ASYNC_ADVANCE_DOORBELL = TU_BIT(6), // [6..6] Tell HC to interrupt next time it advances async list. Clear by HC
 };
 
 enum {
@@ -304,9 +307,9 @@ enum {
   EHCI_PORTSC_MASK_FORCE_RESUME           = TU_BIT(6),
   EHCI_PORTSC_MASK_PORT_SUSPEND           = TU_BIT(7),
   EHCI_PORTSC_MASK_PORT_RESET             = TU_BIT(8),
-  ECHI_PORTSC_MASK_PORT_POWER             = TU_BIT(12),
+  EHCI_PORTSC_MASK_PORT_POWER             = TU_BIT(12),
 
-  EHCI_PORTSC_MASK_CHANGE_ALL =
+  EHCI_PORTSC_MASK_W1C =
     EHCI_PORTSC_MASK_CONNECT_STATUS_CHANGE |
     EHCI_PORTSC_MASK_PORT_ENABLE_CHANGE |
     EHCI_PORTSC_MASK_OVER_CURRENT_CHANGE

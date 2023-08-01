@@ -31,10 +31,27 @@
 extern "C" {
 #endif
 
+#ifdef __GNUC__
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wstrict-prototypes"
+#pragma GCC diagnostic ignored "-Wundef"
+
+// extra push due to https://github.com/renesas/fsp/pull/278
+#pragma GCC diagnostic push
+#endif
+
 /* renesas fsp api */
 #include "bsp_api.h"
 
+#ifdef __GNUC__
+#pragma GCC diagnostic pop
+#endif
+
 #define RUSB2_REG_BASE (0x40090000)
+
+#if defined(__ICCARM__)
+  #define __builtin_ctz(x)             __iar_builtin_CLZ(__iar_builtin_RBIT(x))
+#endif
 
 TU_ATTR_ALWAYS_INLINE static inline void rusb2_int_enable(uint8_t rhport)
 {

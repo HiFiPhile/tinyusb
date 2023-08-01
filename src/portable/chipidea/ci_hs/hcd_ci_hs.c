@@ -28,8 +28,7 @@
 
 // Chipidea Highspeed USB IP implement EHCI for host functionality
 
-#if CFG_TUH_ENABLED && \
-    (CFG_TUSB_MCU == OPT_MCU_LPC18XX || CFG_TUSB_MCU == OPT_MCU_LPC43XX || CFG_TUSB_MCU == OPT_MCU_MIMXRT)
+#if CFG_TUH_ENABLED && defined(TUP_USBIP_EHCI)
 
 //--------------------------------------------------------------------+
 // INCLUDE
@@ -39,8 +38,21 @@
 #include "portable/ehci/ehci_api.h"
 #include "ci_hs_type.h"
 
-#if CFG_TUSB_MCU == OPT_MCU_MIMXRT
+#if CFG_TUSB_MCU == OPT_MCU_MIMXRT1XXX
   #include "ci_hs_imxrt.h"
+
+  bool hcd_dcache_clean(void const* addr, uint32_t data_size) {
+    return imxrt_dcache_clean(addr, data_size);
+  }
+
+  bool hcd_dcache_invalidate(void const* addr, uint32_t data_size) {
+    return imxrt_dcache_invalidate(addr, data_size);
+  }
+
+  bool hcd_dcache_clean_invalidate(void const* addr, uint32_t data_size) {
+    return imxrt_dcache_clean_invalidate(addr, data_size);
+  }
+
 #elif TU_CHECK_MCU(OPT_MCU_LPC18XX, OPT_MCU_LPC43XX)
   #include "ci_hs_lpc18_43.h"
 #else
@@ -50,8 +62,6 @@
 //--------------------------------------------------------------------+
 // MACRO CONSTANT TYPEDEF
 //--------------------------------------------------------------------+
-
-#define CI_HS_REG(_port)      ((ci_hs_regs_t*) _ci_controller[_port].reg_base)
 
 //--------------------------------------------------------------------+
 // Controller API

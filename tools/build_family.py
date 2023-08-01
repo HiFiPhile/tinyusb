@@ -11,7 +11,7 @@ SKIPPED = "\033[33mskipped\033[0m"
 
 build_separator = '-' * 106
 
-make_iar_option = 'CC=iccarm'
+make_iar_option = 'TOOLCHAIN=iar'
 
 def filter_with_input(mylist):
     if len(sys.argv) > 1:
@@ -42,9 +42,9 @@ if __name__ == '__main__':
     # If examples are not specified in arguments, build all
     all_examples = []
     for d in os.scandir("examples"):
-        if d.is_dir() and 'cmake-build' not in d.name and 'cmake' not in d.name:
+        if d.is_dir() and 'cmake' not in d.name:
             for entry in os.scandir(d.path):
-                if entry.is_dir():
+                if entry.is_dir() and 'cmake' not in entry.name:
                     all_examples.append(d.name + '/' + entry.name)
     filter_with_input(all_examples)
     all_examples.sort()
