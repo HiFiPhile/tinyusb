@@ -188,6 +188,11 @@ void hcd_port_reset(uint8_t rhport)
 
   ehci_registers_t* regs = ehci_data.regs;
 
+  // skip if already in reset
+  if (regs->portsc_bm.port_reset) {
+    return;
+  }
+
   // mask out Write-1-to-Clear bits
   uint32_t portsc = regs->portsc & ~EHCI_PORTSC_MASK_W1C;
 
@@ -202,16 +207,18 @@ void hcd_port_reset(uint8_t rhport)
 void hcd_port_reset_end(uint8_t rhport)
 {
   (void) rhport;
-
-#if 0 // TODO check if this is necessary
   ehci_registers_t* regs = ehci_data.regs;
 
+  // skip if reset is already complete
+  if (!regs->portsc_bm.port_reset) {
+    return;
+  }
+
   // mask out all change bits since they are Write 1 to clear
-  uint32_t portsc = regs->portsc & ~EHCI_PORTSC_MASK_CHANGE_ALL;
-  portsc &= ~(EHCI_PORTSC_MASK_PORT_RESET);
+  uint32_t portsc = regs->portsc & ~EHCI_PORTSC_MASK_W1C;
+  portsc &= ~EHCI_PORTSC_MASK_PORT_RESET;
 
   regs->portsc = portsc;
-#endif
 }
 
 bool hcd_port_connect_status(uint8_t rhport)
@@ -426,6 +433,11 @@ bool hcd_setup_send(uint8_t rhport, uint8_t dev_addr, uint8_t const setup_packet
 
   hcd_dcache_clean(setup_packet, 8);
 
+  // Control endpoint never be stalled. Skip reset Data Toggle since it is fixed per stage
+  if (qhd->qtd_overlay.halted) {
+    qhd->qtd_overlay.halted = false;
+  }
+
   // attach TD to QHD -> start transferring
   qhd_attach_qtd(qhd, td);
 
@@ -566,8 +578,10 @@ void qhd_xfer_complete_isr(ehci_qhd_t * qhd) {
     if ( qtd_overlay->halted ) {
       if (qtd_overlay->xact_err || qtd_overlay->err_count == 0 || qtd_overlay->buffer_err || qtd_overlay->babble_err) {
         // Error count = 0 often occurs when device disconnected, or other bus-related error
+        // clear halted bit if not caused by STALL to allow more transfer
         xfer_result = XFER_RESULT_FAILED;
-        TU_LOG3("  QHD xfer err count: %d\n", qtd_overlay->err_count);
+        qtd_overlay->halted = false;
+        TU_LOG3("  QHD xfer err count: %d\r\n", qtd_overlay->err_count);
         // TU_BREAKPOINT(); // TODO skip unplugged device
       }else {
         // no error bits are set, endpoint is halted due to STALL
@@ -642,15 +656,15 @@ void process_period_xfer_isr(uint8_t rhport, uint32_t interval_ms)
 }
 
 //------------- Host Controller Driver's Interrupt Handler -------------//
-void hcd_int_handler(uint8_t rhport)
-{
+void hcd_int_handler(uint8_t rhport, bool in_isr) {
+  (void) in_isr;
   ehci_registers_t* regs = ehci_data.regs;
   uint32_t const int_status = regs->status;
 
   if (int_status & EHCI_INT_MASK_HC_HALTED) {
     // something seriously wrong, maybe forget to flush/invalidate cache
     TU_BREAKPOINT();
-    TU_LOG1("  HC halted\n");
+    TU_LOG1("  HC halted\r\n");
     return;
   }
 
@@ -662,7 +676,7 @@ void hcd_int_handler(uint8_t rhport)
   if (int_status & EHCI_INT_MASK_PORT_CHANGE) {
     // Including: Force port resume, over-current change, enable/disable change and connect status change.
     uint32_t const port_status = regs->portsc & EHCI_PORTSC_MASK_W1C;
-    print_portsc(regs);
+    // print_portsc(regs);
 
     if (regs->portsc_bm.connect_status_change) {
       port_connect_status_change_isr(rhport);

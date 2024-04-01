@@ -109,7 +109,7 @@
 #ifdef TUP_USBIP_FSDEV_STM32
   // Undefine to reduce the dependence on HAL
   #undef USE_HAL_DRIVER
-  #include "portable/st/stm32_fsdev/dcd_stm32_fsdev_pvt_st.h"
+  #include "portable/st/stm32_fsdev/dcd_stm32_fsdev.h"
 #endif
 
 /*****************************************************
@@ -128,8 +128,8 @@
 #  define DCD_STM32_BTABLE_BASE 0U
 #endif
 
-#ifndef DCD_STM32_BTABLE_LENGTH
-#  define DCD_STM32_BTABLE_LENGTH (PMA_LENGTH - DCD_STM32_BTABLE_BASE)
+#ifndef DCD_STM32_BTABLE_SIZE
+#  define DCD_STM32_BTABLE_SIZE (FSDEV_PMA_SIZE - DCD_STM32_BTABLE_BASE)
 #endif
 
 /***************************************************
@@ -137,7 +137,7 @@
  */
 
 TU_VERIFY_STATIC((MAX_EP_COUNT) <= STFSDEV_EP_COUNT, "Only 8 endpoints supported on the hardware");
-TU_VERIFY_STATIC(((DCD_STM32_BTABLE_BASE) + (DCD_STM32_BTABLE_LENGTH))<=(PMA_LENGTH), "BTABLE does not fit in PMA RAM");
+TU_VERIFY_STATIC(((DCD_STM32_BTABLE_BASE) + (DCD_STM32_BTABLE_SIZE)) <= (FSDEV_PMA_SIZE), "BTABLE does not fit in PMA RAM");
 TU_VERIFY_STATIC(((DCD_STM32_BTABLE_BASE) % 8) == 0, "BTABLE base must be aligned to 8 bytes");
 
 //--------------------------------------------------------------------+
@@ -200,8 +200,7 @@ static bool dcd_read_packet_memory_ff(tu_fifo_t * ff, uint16_t src, uint16_t wNB
 // Inline helper
 //--------------------------------------------------------------------+
 
-TU_ATTR_ALWAYS_INLINE static inline xfer_ctl_t* xfer_ctl_ptr(uint32_t ep_addr)
-{
+TU_ATTR_ALWAYS_INLINE static inline xfer_ctl_t* xfer_ctl_ptr(uint32_t ep_addr) {
   uint8_t epnum = tu_edpt_number(ep_addr);
   uint8_t dir = tu_edpt_dir(ep_addr);
   // Fix -Werror=null-dereference
@@ -242,7 +241,7 @@ void dcd_init (uint8_t rhport)
   }
   USB->CNTR = 0; // Enable USB
 
-#ifndef STM32G0 // BTABLE register does not exist any more on STM32G0, it is fixed to USB SRAM base address
+#if !defined(STM32G0) && !defined(STM32H5)  // BTABLE register does not exist any more on STM32G0, it is fixed to USB SRAM base address
   USB->BTABLE = DCD_STM32_BTABLE_BASE;
 #endif
   USB->ISTR = 0; // Clear pending interrupts
@@ -358,6 +357,9 @@ void dcd_int_enable (uint8_t rhport)
     NVIC_EnableIRQ(USB_UCPD1_2_IRQn);
   #endif
 
+#elif CFG_TUSB_MCU == OPT_MCU_STM32H5
+    NVIC_EnableIRQ(USB_DRD_FS_IRQn);
+
 #elif CFG_TUSB_MCU == OPT_MCU_STM32WB
   NVIC_EnableIRQ(USB_HP_IRQn);
   NVIC_EnableIRQ(USB_LP_IRQn);
@@ -414,6 +416,9 @@ void dcd_int_disable(uint8_t rhport)
   #else
     NVIC_DisableIRQ(USB_UCPD1_2_IRQn);
   #endif
+
+#elif CFG_TUSB_MCU == OPT_MCU_STM32H5
+    NVIC_DisableIRQ(USB_DRD_FS_IRQn);
 
 #elif CFG_TUSB_MCU == OPT_MCU_STM32WB
   NVIC_DisableIRQ(USB_HP_IRQn);
@@ -518,7 +523,7 @@ static void dcd_ep_ctr_tx_handler(uint32_t wIstr)
   xfer_ctl_t * xfer = xfer_ctl_ptr(ep_addr);
   if((xfer->total_len != xfer->queued_len)) /* TX not complete */
   {
-      dcd_transmit_packet(xfer, EPindex);
+    dcd_transmit_packet(xfer, EPindex);
   }
   else /* TX Complete */
   {
@@ -527,10 +532,29 @@ static void dcd_ep_ctr_tx_handler(uint32_t wIstr)
 }
 
 // Handle CTR interrupt for the RX/OUT direction
-//
 // Upon call, (wIstr & USB_ISTR_DIR) == 0U
-static void dcd_ep_ctr_rx_handler(uint32_t wIstr)
-{
+static void dcd_ep_ctr_rx_handler(uint32_t wIstr) {
+  #ifdef FSDEV_BUS_32BIT
+  /* https://www.st.com/resource/en/errata_sheet/es0561-stm32h503cbebkbrb-device-errata-stmicroelectronics.pdf
+   * From STM32H503 errata 2.15.1: Buffer description table update completes after CTR interrupt triggers
+   * Description:
+   * - During OUT transfers, the correct transfer interrupt (CTR) is triggered a little before the last USB SRAM accesses
+   * have completed. If the software responds quickly to the interrupt, the full buffer contents may not be correct.
+   * Workaround:
+   * - Software should ensure that a small delay is included before accessing the SRAM contents. This delay
+   * should be 800 ns in Full Speed mode and 6.4 μs in Low Speed mode
+   * - Since H5 can run up to 250Mhz -> 1 cycle = 4ns. Per errata, we need to wait 200 cycles. Though executing code
+   * also takes time, so we'll wait 40 cycles (count = 20).
+   * - Since Low Speed mode is not supported/popular, we will ignore it for now.
+   *
+   * Note: this errata also seems to apply to G0, U5, H5 etc.
+   */
+  volatile uint32_t cycle_count = 20; // defined as PCD_RX_PMA_CNT in stm32 hal_driver
+  while (cycle_count > 0U) {
+    cycle_count--; // each count take 2 cycle (1 cycle for sub, 1 cycle for compare/jump)
+  }
+  #endif
+
   uint32_t EPindex = wIstr & USB_ISTR_EP_ID;
   uint32_t wEPRegVal = pcd_get_endpoint(USB, EPindex);
   uint8_t ep_addr = wEPRegVal & USB_EPADDR_FIELD;
@@ -539,8 +563,7 @@ static void dcd_ep_ctr_rx_handler(uint32_t wIstr)
 
   // Verify the CTR_RX bit is set. This was in the ST Micro code,
   // but I'm not sure it's actually necessary?
-  if((wEPRegVal & USB_EP_CTR_RX) == 0U)
-  {
+  if((wEPRegVal & USB_EP_CTR_RX) == 0U) {
     return;
   }
 
@@ -553,7 +576,7 @@ static void dcd_ep_ctr_rx_handler(uint32_t wIstr)
       // Must reset EP to NAK (in case it had been stalling) (though, maybe too late here)
       pcd_set_ep_rx_status(USB,0u,USB_EP_RX_NAK);
       pcd_set_ep_tx_status(USB,0u,USB_EP_TX_NAK);
-#ifdef PMA_32BIT_ACCESS
+#ifdef FSDEV_BUS_32BIT
       dcd_event_setup_received(0, (uint8_t*)(USB_PMAADDR + pcd_get_ep_rx_address(USB, EPindex)), true);
 #else
       // The setup_received function uses memcpy, so this must first copy the setup data into
@@ -627,26 +650,22 @@ static void dcd_ep_ctr_rx_handler(uint32_t wIstr)
   // (Based on the docs, it seems SETUP will always be accepted after CTR is cleared)
   if(ep_addr == 0u)
   {
-      // Always be prepared for a status packet...
+    // Always be prepared for a status packet...
     pcd_set_ep_rx_bufsize(USB, EPindex, CFG_TUD_ENDPOINT0_SIZE);
     pcd_clear_rx_ep_ctr(USB, EPindex);
   }
 }
 
-static void dcd_ep_ctr_handler(void)
-{
+static void dcd_ep_ctr_handler(void) {
   uint32_t wIstr;
 
   /* stay in loop while pending interrupts */
-  while (((wIstr = USB->ISTR) & USB_ISTR_CTR) != 0U)
-  {
-
-    if ((wIstr & USB_ISTR_DIR) == 0U) /* TX/IN */
-    {
+  while (((wIstr = USB->ISTR) & USB_ISTR_CTR) != 0U) {
+    if ((wIstr & USB_ISTR_DIR) == 0U) {
+      /* TX/IN */
       dcd_ep_ctr_tx_handler(wIstr);
-    }
-    else /* RX/OUT*/
-    {
+    } else {
+      /* RX/OUT*/
       dcd_ep_ctr_rx_handler(wIstr);
     }
   }
@@ -667,13 +686,13 @@ void dcd_int_handler(uint8_t rhport) {
 
   /* Put SOF flag at the beginning of ISR in case to get least amount of jitter if it is used for timing purposes */
   if(int_status & USB_ISTR_SOF) {
-    USB->ISTR &=~USB_ISTR_SOF;
+    USB->ISTR = (fsdev_bus_t)~USB_ISTR_SOF;
     dcd_event_sof(0, USB->FNR & USB_FNR_FN, true);
   }
 
   if(int_status & USB_ISTR_RESET) {
     // USBRST is start of reset.
-    USB->ISTR &=~USB_ISTR_RESET;
+    USB->ISTR = (fsdev_bus_t)~USB_ISTR_RESET;
     dcd_handle_bus_reset();
     dcd_event_bus_reset(0, TUSB_SPEED_FULL, true);
     return; // Don't do the rest of the things here; perhaps they've been cleared?
@@ -691,7 +710,7 @@ void dcd_int_handler(uint8_t rhport) {
     USB->CNTR &= ~USB_CNTR_LPMODE;
     USB->CNTR &= ~USB_CNTR_FSUSP;
 
-    USB->ISTR &=~USB_ISTR_WKUP;
+    USB->ISTR = (fsdev_bus_t)~USB_ISTR_WKUP;
     dcd_event_bus_signal(0, DCD_EVENT_RESUME, true);
   }
 
@@ -705,7 +724,7 @@ void dcd_int_handler(uint8_t rhport) {
     USB->CNTR |= USB_CNTR_LPMODE;
 
     /* clear of the ISTR bit must be done after setting of CNTR_FSUSP */
-    USB->ISTR &=~USB_ISTR_SUSP;
+    USB->ISTR = (fsdev_bus_t)~USB_ISTR_SUSP;
     dcd_event_bus_signal(0, DCD_EVENT_SUSPEND, true);
   }
 
@@ -718,7 +737,7 @@ void dcd_int_handler(uint8_t rhport) {
     {
       remoteWakeCountdown--;
     }
-    USB->ISTR &=~USB_ISTR_ESOF;
+    USB->ISTR = (fsdev_bus_t)~USB_ISTR_ESOF;
   }
 }
 
@@ -780,7 +799,7 @@ static uint16_t dcd_pma_alloc(uint8_t ep_addr, uint16_t length)
   }
 
   // Ensure allocated buffer is aligned
-#ifdef PMA_32BIT_ACCESS
+#ifdef FSDEV_BUS_32BIT
   length = (length + 3) & ~0x03;
 #else
   length = (length + 1) & ~0x01;
@@ -792,7 +811,7 @@ static uint16_t dcd_pma_alloc(uint8_t ep_addr, uint16_t length)
   ep_buf_ptr = (uint16_t)(ep_buf_ptr + length); // increment buffer pointer
 
   // Verify no overflow
-  TU_ASSERT(ep_buf_ptr <= PMA_LENGTH, 0xFFFF);
+  TU_ASSERT(ep_buf_ptr <= FSDEV_PMA_SIZE, 0xFFFF);
 
   epXferCtl->pma_ptr = addr;
   epXferCtl->pma_alloc_size = length;
@@ -1221,7 +1240,7 @@ void dcd_edpt_clear_stall (uint8_t rhport, uint8_t ep_addr)
   }
 }
 
-#ifdef PMA_32BIT_ACCESS
+#ifdef FSDEV_BUS_32BIT
 static bool dcd_write_packet_memory(uint16_t dst, const void *__restrict src, uint16_t wNBytes)
 {
   const uint8_t* srcVal = src;
@@ -1277,7 +1296,7 @@ static bool dcd_write_packet_memory(uint16_t dst, const void *__restrict src, ui
   __IO uint16_t *pdwVal;
 
   srcVal = src;
-  pdwVal = &pma[PMA_STRIDE*(dst>>1)];
+  pdwVal = &pma[FSDEV_PMA_STRIDE * (dst >> 1)];
 
   while (n--)
   {
@@ -1285,7 +1304,7 @@ static bool dcd_write_packet_memory(uint16_t dst, const void *__restrict src, ui
     srcVal++;
     temp2 = temp1 | ((uint16_t)(((uint16_t)(*srcVal)) << 8U)) ;
     *pdwVal = temp2;
-    pdwVal += PMA_STRIDE;
+    pdwVal += FSDEV_PMA_STRIDE;
     srcVal++;
   }
 
@@ -1317,7 +1336,7 @@ static bool dcd_write_packet_memory_ff(tu_fifo_t * ff, uint16_t dst, uint16_t wN
   // We want to read from the FIFO and write it into the PMA, if LIN part is ODD and has WRAPPED part,
   // last lin byte will be combined with wrapped part
   // To ensure PMA is always access aligned (dst aligned to 16 or 32 bit)
-#ifdef PMA_32BIT_ACCESS
+#ifdef FSDEV_BUS_32BIT
   if((cnt_lin & 0x03) && cnt_wrap)
   {
     // Copy first linear part
@@ -1380,7 +1399,7 @@ static bool dcd_write_packet_memory_ff(tu_fifo_t * ff, uint16_t dst, uint16_t wN
   return true;
 }
 
-#ifdef PMA_32BIT_ACCESS
+#ifdef FSDEV_BUS_32BIT
 static bool dcd_read_packet_memory(void *__restrict dst, uint16_t src, uint16_t wNBytes)
 {
   uint8_t* dstVal = dst;
@@ -1428,13 +1447,13 @@ static bool dcd_read_packet_memory(void *__restrict dst, uint16_t src, uint16_t 
   __IO const uint16_t *pdwVal;
   uint32_t temp;
 
-  pdwVal = &pma[PMA_STRIDE*(src>>1)];
+  pdwVal = &pma[FSDEV_PMA_STRIDE * (src >> 1)];
   uint8_t *dstVal = (uint8_t*)dst;
 
   while (n--)
   {
     temp = *pdwVal;
-    pdwVal += PMA_STRIDE;
+    pdwVal += FSDEV_PMA_STRIDE;
     *dstVal++ = ((temp >> 0) & 0xFF);
     *dstVal++ = ((temp >> 8) & 0xFF);
   }
@@ -1442,7 +1461,7 @@ static bool dcd_read_packet_memory(void *__restrict dst, uint16_t src, uint16_t 
   if (wNBytes & 0x01)
   {
     temp = *pdwVal;
-    pdwVal += PMA_STRIDE;
+    pdwVal += FSDEV_PMA_STRIDE;
     *dstVal++ = ((temp >> 0) & 0xFF);
   }
   return true;
@@ -1469,7 +1488,7 @@ static bool dcd_read_packet_memory_ff(tu_fifo_t * ff, uint16_t src, uint16_t wNB
   // We want to read from PMA and write it into the FIFO, if LIN part is ODD and has WRAPPED part,
   // last lin byte will be combined with wrapped part
   // To ensure PMA is always access aligned (src aligned to 16 or 32 bit)
-#ifdef PMA_32BIT_ACCESS
+#ifdef FSDEV_BUS_32BIT
   if((cnt_lin & 0x03) && cnt_wrap)
   {
     // Copy first linear part
