@@ -1025,28 +1025,10 @@ static void handle_rxflvl_irq(uint8_t rhport) {
     }
       break;
 
-      // Out packet done (Interrupt)
+    // Out packet done (Interrupt)
     case GRXSTS_PKTSTS_OUTDONE:
-      // Occurred on STM32L47 with dwc2 version 3.10a but not found on other version like 2.80a or 3.30a
-      // May (or not) be 3.10a specific feature/bug or depending on MCU configuration
-      // XFRC complete is additionally generated when
-      // - setup packet is received
-      // - complete the data stage of control write is complete
-      if ((epnum == 0) && (bcnt == 0) && (dwc2->gsnpsid >= DWC2_CORE_REV_3_00a)) {
-        uint32_t doepint = epout->doepint;
-
-        if (doepint & (DOEPINT_STPKTRX | DOEPINT_OTEPSPR)) {
-          // skip this "no-data" transfer complete event
-          // Note: STPKTRX will be clear later by setup received handler
-          uint32_t clear_flags = DOEPINT_XFRC;
-
-          if (doepint & DOEPINT_OTEPSPR) clear_flags |= DOEPINT_OTEPSPR;
-
-          epout->doepint = clear_flags;
-
-          // TU_LOG(DWC2_DEBUG, "  FIX extra transfer complete on setup/data compete\r\n");
-        }
-      }
+      // This interrupt can occur, but does not need to be handled here. Flags will be cleared
+      // later by setup received handler.
       break;
 
     default:    // Invalid
@@ -1073,34 +1055,29 @@ static void handle_epout_irq(uint8_t rhport) {
 
         xfer_ctl_t* xfer = XFER_CTL_BASE(n, TUSB_DIR_OUT);
 
-        if (doepint & DOEPINT_STUP) {
-          // STPKTRX is only available for version from 3_00a
-          if ((doepint & DOEPINT_STPKTRX) && (dwc2->gsnpsid >= DWC2_CORE_REV_3_00a)) {
-            epout->doepint = DOEPINT_STPKTRX;
+        if ((dwc2->gsnpsid >= DWC2_CORE_REV_3_10a) && (doepint & DOEPINT_STPKTRX)) {
+          epout->doepint = DOEPINT_STPKTRX;
+        }
+        else {
+          if ((dwc2->gsnpsid >= DWC2_CORE_REV_3_10a) && (doepint & DOEPINT_OTEPSPR)) {
+            epout->doepint = DOEPINT_OTEPSPR;
           }
-        } else if (doepint & DOEPINT_OTEPSPR) {
-          epout->doepint = DOEPINT_OTEPSPR;
-        } else {
-          if ((doepint & DOEPINT_STPKTRX) && (dwc2->gsnpsid >= DWC2_CORE_REV_3_00a)) {
-            epout->doepint = DOEPINT_STPKTRX;
-          } else {
-            // EP0 can only handle one packet
-            if ((n == 0) && ep0_pending[TUSB_DIR_OUT]) {
-              // Schedule another packet to be received.
-              edpt_schedule_packets(rhport, n, TUSB_DIR_OUT, 1, ep0_pending[TUSB_DIR_OUT]);
-            } else {
-              if(dma_enabled(rhport)) {
-                // Fix packet length
-                uint16_t remain = (epout->doeptsiz & DOEPTSIZ_XFRSIZ_Msk) >> DOEPTSIZ_XFRSIZ_Pos;
-                xfer->total_len -= remain;
-                // this is ZLP, so prepare EP0 for next setup
-                if(n == 0 && xfer->total_len == 0) {
-                  dma_stpkt_rx(rhport);
-                }
-              }
 
-              dcd_event_xfer_complete(rhport, n, xfer->total_len, XFER_RESULT_SUCCESS, true);
+          // EP0 can only handle one packet
+          if ((n == 0) && ep0_pending[TUSB_DIR_OUT]) {
+            // Schedule another packet to be received.
+            edpt_schedule_packets(rhport, n, TUSB_DIR_OUT, 1, ep0_pending[TUSB_DIR_OUT]);
+          } else {
+            if (dma_enabled(rhport)) {
+              // Fix packet length
+              uint16_t remain = (epout->doeptsiz & DOEPTSIZ_XFRSIZ_Msk) >> DOEPTSIZ_XFRSIZ_Pos;
+              xfer->total_len -= remain;
+              // this is ZLP, so prepare EP0 for next setup
+              if (n == 0 && xfer->total_len == 0) {
+                dma_stpkt_rx(rhport);
+              }
             }
+            dcd_event_xfer_complete(rhport, n, xfer->total_len, XFER_RESULT_SUCCESS, true);
           }
         }
       }
