@@ -463,7 +463,7 @@ typedef struct
 //--------------------------------------------------------------------+
 
 #if CFG_TUD_AUDIO_ENABLE_EP_IN
-TU_ATTR_WEAK bool tud_audio_tx_done_pre_load_cb(uint8_t rhport, uint8_t func_id, uint8_t ep_in, uint8_t cur_alt_setting) {
+TU_ATTR_WEAK bool tud_audio_tx_done_cb(uint8_t rhport, uint8_t func_id, uint8_t ep_in, uint8_t cur_alt_setting) {
   (void) rhport;
   (void) func_id;
   (void) ep_in;
@@ -471,27 +471,10 @@ TU_ATTR_WEAK bool tud_audio_tx_done_pre_load_cb(uint8_t rhport, uint8_t func_id,
   return true;
 }
 
-TU_ATTR_WEAK bool tud_audio_tx_done_post_load_cb(uint8_t rhport, uint16_t n_bytes_copied, uint8_t func_id, uint8_t ep_in, uint8_t cur_alt_setting) {
-  (void) rhport;
-  (void) n_bytes_copied;
-  (void) func_id;
-  (void) ep_in;
-  (void) cur_alt_setting;
-  return true;
-}
 #endif
 
 #if CFG_TUD_AUDIO_ENABLE_EP_OUT
-TU_ATTR_WEAK bool tud_audio_rx_done_pre_read_cb(uint8_t rhport, uint16_t n_bytes_received, uint8_t func_id, uint8_t ep_out, uint8_t cur_alt_setting) {
-  (void) rhport;
-  (void) n_bytes_received;
-  (void) func_id;
-  (void) ep_out;
-  (void) cur_alt_setting;
-  return true;
-}
-
-TU_ATTR_WEAK bool tud_audio_rx_done_post_read_cb(uint8_t rhport, uint16_t n_bytes_received, uint8_t func_id, uint8_t ep_out, uint8_t cur_alt_setting) {
+TU_ATTR_WEAK bool tud_audio_rx_done_cb(uint8_t rhport, uint16_t n_bytes_received, uint8_t func_id, uint8_t ep_out, uint8_t cur_alt_setting) {
   (void) rhport;
   (void) n_bytes_received;
   (void) func_id;
@@ -525,7 +508,7 @@ TU_ATTR_WEAK TU_ATTR_FAST_FUNC void tud_audio_feedback_interval_isr(uint8_t func
 #endif
 
 #if CFG_TUD_AUDIO_ENABLE_INTERRUPT_EP
-TU_ATTR_WEAK void tud_audio_int_done_cb(uint8_t rhport) {
+TU_ATTR_WEAK void tud_audio_int_xfer_cb(uint8_t rhport) {
   (void) rhport;
 }
 #endif
@@ -601,7 +584,8 @@ TU_ATTR_WEAK bool tud_audio_get_req_entity_cb(uint8_t rhport, tusb_control_reque
 tu_static CFG_TUD_MEM_SECTION audiod_function_t _audiod_fct[CFG_TUD_AUDIO];
 
 #if CFG_TUD_AUDIO_ENABLE_EP_OUT
-static bool audiod_rx_done_cb(uint8_t rhport, audiod_function_t *audio, uint16_t n_bytes_received);
+static bool audiod_rx_xfer_cb(uint8_t rhport, audiod_function_t *audio, uint16_t n_bytes_received);
+static bool audiod_rx_xfer_isr(uint8_t rhport, audiod_function_t* audio, uint16_t n_bytes_received);
 #endif
 
 #if CFG_TUD_AUDIO_ENABLE_DECODING && CFG_TUD_AUDIO_ENABLE_EP_OUT
@@ -609,7 +593,8 @@ static bool audiod_decode_type_I_pcm(uint8_t rhport, audiod_function_t *audio, u
 #endif
 
 #if CFG_TUD_AUDIO_ENABLE_EP_IN
-static bool audiod_tx_done_cb(uint8_t rhport, audiod_function_t *audio);
+static bool audiod_tx_xfer_cb(uint8_t rhport, audiod_function_t *audio);
+static bool audiod_tx_xfer_isr(uint8_t rhport, audiod_function_t* audio);
 #endif
 
 #if CFG_TUD_AUDIO_ENABLE_ENCODING && CFG_TUD_AUDIO_ENABLE_EP_IN
@@ -707,7 +692,7 @@ tu_fifo_t *tud_audio_n_get_rx_support_ff(uint8_t func_id, uint8_t ff_idx) {
 
 #if CFG_TUD_AUDIO_ENABLE_EP_OUT
 
-static bool audiod_rx_done_cb(uint8_t rhport, audiod_function_t *audio, uint16_t n_bytes_received) {
+static bool audiod_rx_xfer_cb(uint8_t rhport, audiod_function_t *audio, uint16_t n_bytes_received) {
   uint8_t idxItf = 0;
   uint8_t const *dummy2;
   uint8_t idx_audio_fct = 0;
@@ -715,15 +700,33 @@ static bool audiod_rx_done_cb(uint8_t rhport, audiod_function_t *audio, uint16_t
   idx_audio_fct = audiod_get_audio_fct_idx(audio);
   TU_VERIFY(audiod_get_AS_interface_index(audio->ep_out_as_intf_num, audio, &idxItf, &dummy2));
 
-  // Call a weak callback here - a possibility for user to get informed an audio packet was received and data gets now loaded into EP FIFO (or decoded into support RX software FIFO)
-  TU_VERIFY(tud_audio_rx_done_pre_read_cb(rhport, n_bytes_received, idx_audio_fct, audio->ep_out, audio->alt_setting[idxItf]));
+#if CFG_TUD_AUDIO_ENABLE_FEEDBACK_EP
+#if CFG_TUD_AUDIO_ENABLE_DECODING
+  if(audio->feedback.compute_method == AUDIO_FEEDBACK_METHOD_FIFO_COUNT)
+  {
+    audiod_fb_fifo_count_update(audio, tu_fifo_count(&audio->rx_supp_ff[0]));
+  }
+#else
+  if(audio->feedback.compute_method == AUDIO_FEEDBACK_METHOD_FIFO_COUNT)
+  {
+    audiod_fb_fifo_count_update(audio, tu_fifo_count(&audio->ep_out_ff));
+  }
+#endif
+#endif
 
+  // Call a weak callback here - a possibility for user to get informed decoding was completed
+  TU_VERIFY(tud_audio_rx_done_cb(rhport, n_bytes_received, idx_audio_fct, audio->ep_out, audio->alt_setting[idxItf]));
+
+  return true;
+}
+
+static bool audiod_rx_xfer_isr(uint8_t rhport, audiod_function_t* audio, uint16_t n_bytes_received)
+{
   #if CFG_TUD_AUDIO_ENABLE_DECODING
 
   switch (audio->format_type_rx) {
     case AUDIO_FORMAT_TYPE_UNDEFINED:
       // INDIVIDUAL DECODING PROCEDURE REQUIRED HERE!
-      TU_LOG2("  Desired CFG_TUD_AUDIO_FORMAT encoding not implemented!\r\n");
       TU_BREAKPOINT();
       break;
 
@@ -736,17 +739,15 @@ static bool audiod_rx_done_cb(uint8_t rhport, audiod_function_t *audio, uint16_t
 
         default:
           // DESIRED CFG_TUD_AUDIO_FORMAT_TYPE_I_RX NOT IMPLEMENTED!
-          TU_LOG2("  Desired CFG_TUD_AUDIO_FORMAT_TYPE_I_RX encoding not implemented!\r\n");
           TU_BREAKPOINT();
           break;
       }
       break;
 
-    default:
-      // Desired CFG_TUD_AUDIO_FORMAT_TYPE_RX not implemented!
-      TU_LOG2("  Desired CFG_TUD_AUDIO_FORMAT_TYPE_RX not implemented!\r\n");
-      TU_BREAKPOINT();
-      break;
+        default:
+          // Desired CFG_TUD_AUDIO_FORMAT_TYPE_RX not implemented!
+          TU_BREAKPOINT();
+          break;
   }
 
   // Prepare for next transmission
@@ -772,9 +773,6 @@ static bool audiod_rx_done_cb(uint8_t rhport, audiod_function_t *audio, uint16_t
     #endif
 
   #endif
-
-  // Call a weak callback here - a possibility for user to get informed decoding was completed
-  TU_VERIFY(tud_audio_rx_done_post_read_cb(rhport, n_bytes_received, idx_audio_fct, audio->ep_out, audio->alt_setting[idxItf]));
 
   return true;
 }
@@ -882,7 +880,7 @@ static bool audiod_decode_type_I_pcm(uint8_t rhport, audiod_function_t *audio, u
 /**
  * \brief           Write data to EP in buffer
  *
- *  Write data to buffer. If it is full, new data can be inserted once a transmit was scheduled. See audiod_tx_done_cb().
+ *  Write data to buffer. If it is full, new data can be inserted once a transmit was scheduled. See audiod_tx_xfer_cb().
  *  If TX FIFOs are used, this function is not available in order to not let the user mess up the encoding process.
  *
  * \param[in]       func_id: Index of audio function interface
@@ -910,21 +908,6 @@ tu_fifo_t *tud_audio_n_get_ep_in_ff(uint8_t func_id) {
 
 #if CFG_TUD_AUDIO_ENABLE_ENCODING && CFG_TUD_AUDIO_ENABLE_EP_IN
 
-uint16_t tud_audio_n_flush_tx_support_ff(uint8_t func_id)// Force all content in the support TX FIFOs to be written into linear buffer and schedule a transmit
-{
-  TU_VERIFY(func_id < CFG_TUD_AUDIO && _audiod_fct[func_id].p_desc != NULL);
-  audiod_function_t *audio = &_audiod_fct[func_id];
-
-  uint16_t n_bytes_copied = tu_fifo_count(&audio->tx_supp_ff[0]);
-
-  TU_VERIFY(audiod_tx_done_cb(audio->rhport, audio));
-
-  n_bytes_copied -= tu_fifo_count(&audio->tx_supp_ff[0]);
-  n_bytes_copied = n_bytes_copied * audio->tx_supp_ff[0].item_size;
-
-  return n_bytes_copied;
-}
-
 bool tud_audio_n_clear_tx_support_ff(uint8_t func_id, uint8_t ff_idx) {
   TU_VERIFY(func_id < CFG_TUD_AUDIO && _audiod_fct[func_id].p_desc != NULL && ff_idx < _audiod_fct[func_id].n_tx_supp_ff);
   return tu_fifo_clear(&_audiod_fct[func_id].tx_supp_ff[ff_idx]);
@@ -944,7 +927,7 @@ tu_fifo_t *tud_audio_n_get_tx_support_ff(uint8_t func_id, uint8_t ff_idx) {
 
 
 #if CFG_TUD_AUDIO_ENABLE_INTERRUPT_EP
-// If no interrupt transmit is pending bytes get written into buffer and a transmit is scheduled - once transmit completed tud_audio_int_done_cb() is called in inform user
+// If no interrupt transmit is pending bytes get written into buffer and a transmit is scheduled - once transmit completed tud_audio_int_xfer_cb() is called in inform user
 bool tud_audio_int_n_write(uint8_t func_id, const audio_interrupt_data_t *data) {
   TU_VERIFY(func_id < CFG_TUD_AUDIO && _audiod_fct[func_id].p_desc != NULL);
 
@@ -971,7 +954,7 @@ bool tud_audio_int_n_write(uint8_t func_id, const audio_interrupt_data_t *data) 
 
 // n_bytes_copied - Informs caller how many bytes were loaded. In case n_bytes_copied = 0, a ZLP is scheduled to inform host no data is available for current frame.
 #if CFG_TUD_AUDIO_ENABLE_EP_IN
-static bool audiod_tx_done_cb(uint8_t rhport, audiod_function_t *audio) {
+static bool audiod_tx_xfer_cb(uint8_t rhport, audiod_function_t *audio) {
   uint8_t idxItf;
   uint8_t const *dummy2;
 
@@ -983,7 +966,17 @@ static bool audiod_tx_done_cb(uint8_t rhport, audiod_function_t *audio) {
 
   // Call a weak callback here - a possibility for user to get informed former TX was completed and data gets now loaded into EP in buffer (in case FIFOs are used) or
   // if no FIFOs are used the user may use this call back to load its data into the EP IN buffer by use of tud_audio_n_write_ep_in_buffer().
-  TU_VERIFY(tud_audio_tx_done_pre_load_cb(rhport, idx_audio_fct, audio->ep_in, audio->alt_setting[idxItf]));
+  TU_VERIFY(tud_audio_tx_done_cb(rhport, idx_audio_fct, audio->ep_in, audio->alt_setting[idxItf]));
+
+  return true;
+}
+
+static bool audiod_tx_xfer_isr(uint8_t rhport, audiod_function_t * audio)
+{
+  uint8_t idxItf;
+
+  // Only send something if current alternate interface is not 0 as in this case nothing is to be sent due to UAC2 specifications
+  if (audio->alt_setting[idxItf] == 0) return false;
 
   // Send everything in ISO EP FIFO
   uint16_t n_bytes_tx;
@@ -993,7 +986,6 @@ static bool audiod_tx_done_cb(uint8_t rhport, audiod_function_t *audio) {
   switch (audio->format_type_tx) {
     case AUDIO_FORMAT_TYPE_UNDEFINED:
       // INDIVIDUAL ENCODING PROCEDURE REQUIRED HERE!
-      TU_LOG2("  Desired CFG_TUD_AUDIO_FORMAT encoding not implemented!\r\n");
       TU_BREAKPOINT();
       n_bytes_tx = 0;
       break;
@@ -1008,19 +1000,17 @@ static bool audiod_tx_done_cb(uint8_t rhport, audiod_function_t *audio) {
 
         default:
           // YOUR ENCODING IS REQUIRED HERE!
-          TU_LOG2("  Desired CFG_TUD_AUDIO_FORMAT_TYPE_I_TX encoding not implemented!\r\n");
           TU_BREAKPOINT();
           n_bytes_tx = 0;
           break;
       }
       break;
 
-    default:
-      // Desired CFG_TUD_AUDIO_FORMAT_TYPE_TX not implemented!
-      TU_LOG2("  Desired CFG_TUD_AUDIO_FORMAT_TYPE_TX not implemented!\r\n");
-      TU_BREAKPOINT();
-      n_bytes_tx = 0;
-      break;
+        default:
+          // Desired CFG_TUD_AUDIO_FORMAT_TYPE_TX not implemented!
+          TU_BREAKPOINT();
+          n_bytes_tx = 0;
+          break;
   }
 
   TU_VERIFY(usbd_edpt_xfer(rhport, audio->ep_in, audio->lin_buf_in, n_bytes_tx));
@@ -1043,12 +1033,8 @@ static bool audiod_tx_done_cb(uint8_t rhport, audiod_function_t *audio) {
 
   #endif
 
-  // Call a weak callback here - a possibility for user to get informed former TX was completed and how many bytes were loaded for the next frame
-  TU_VERIFY(tud_audio_tx_done_post_load_cb(rhport, n_bytes_tx, idx_audio_fct, audio->ep_in, audio->alt_setting[idxItf]));
-
   return true;
 }
-
 #endif//CFG_TUD_AUDIO_ENABLE_EP_IN
 
 #if CFG_TUD_AUDIO_ENABLE_ENCODING && CFG_TUD_AUDIO_ENABLE_EP_IN
@@ -1113,9 +1099,6 @@ static inline void *audiod_interleaved_copy_bytes_fast_encode(uint16_t const nBy
 static uint16_t audiod_encode_type_I_pcm(uint8_t rhport, audiod_function_t *audio) {
   // This function relies on the fact that the length of the support FIFOs was configured to be a multiple of the active sample size in bytes s.t. no sample is split within a wrap
   // This is ensured within set_interface, where the FIFOs are reconfigured according to this size
-
-  // We encode directly into IN EP's linear buffer - abort if previous transfer not complete
-  TU_VERIFY(!usbd_edpt_busy(rhport, audio->ep_in));
 
   // Determine amount of samples
   uint8_t const n_ff_used = audio->n_ff_used_tx;
@@ -1896,7 +1879,8 @@ static bool audiod_set_interface(uint8_t rhport, tusb_control_request_t const *p
 
             // Schedule first transmit if alternate interface is not zero i.e. streaming is disabled - in case no sample data is available a ZLP is loaded
             // It is necessary to trigger this here since the refill is done with an RX FIFO empty interrupt which can only trigger if something was in there
-            TU_VERIFY(audiod_tx_done_cb(rhport, &_audiod_fct[func_id]));
+            TU_VERIFY(audiod_tx_xfer_cb(rhport, &_audiod_fct[func_id]));
+            TU_VERIFY(audiod_tx_xfer_isr(rhport, &_audiod_fct[func_id]));
           }
 #endif// CFG_TUD_AUDIO_ENABLE_EP_IN
 
@@ -2198,7 +2182,7 @@ bool audiod_xfer_cb(uint8_t rhport, uint8_t ep_addr, xfer_result_t result, uint3
       // I assume here, that things above are handled by PHY
       // All transmission is done - what remains to do is to inform job was completed
 
-      tud_audio_int_done_cb(rhport);
+      tud_audio_int_xfer_cb(rhport);
       return true;
     }
 
@@ -2217,9 +2201,7 @@ bool audiod_xfer_cb(uint8_t rhport, uint8_t ep_addr, xfer_result_t result, uint3
       // This is the only place where we can fill something into the EPs buffer!
 
       // Load new data
-      TU_VERIFY(audiod_tx_done_cb(rhport, audio));
-
-      // Transmission of ZLP is done by audiod_tx_done_cb()
+      TU_VERIFY(audiod_tx_xfer_cb(rhport, audio));
       return true;
     }
 #endif
@@ -2228,7 +2210,7 @@ bool audiod_xfer_cb(uint8_t rhport, uint8_t ep_addr, xfer_result_t result, uint3
 
     // New audio packet received
     if (audio->ep_out == ep_addr) {
-      TU_VERIFY(audiod_rx_done_cb(rhport, audio, (uint16_t) xferred_bytes));
+      TU_VERIFY(audiod_rx_xfer_cb(rhport, audio, (uint16_t) xferred_bytes));
       return true;
     }
 
@@ -2245,6 +2227,50 @@ bool audiod_xfer_cb(uint8_t rhport, uint8_t ep_addr, xfer_result_t result, uint3
       }
     }
   #endif
+#endif
+  }
+
+  return false;
+}
+
+bool audiod_xfer_isr(uint8_t rhport, uint8_t ep_addr, xfer_result_t result, uint32_t xferred_bytes)
+{
+  (void) result;
+  (void) xferred_bytes;
+
+  // Search for interface belonging to given end point address and proceed as required
+  for (uint8_t func_id = 0; func_id < CFG_TUD_AUDIO; func_id++)
+  {
+    audiod_function_t* audio = &_audiod_fct[func_id];
+
+#if CFG_TUD_AUDIO_ENABLE_EP_IN
+
+    // Data transmission of audio packet finished
+    if (audio->ep_in == ep_addr && audio->alt_setting != 0)
+    {
+      // USB 2.0, section 5.6.4, third paragraph, states "An isochronous endpoint must specify its required bus access period. However, an isochronous endpoint must be prepared to handle poll rates faster than the one specified."
+      // That paragraph goes on to say "An isochronous IN endpoint must return a zero-length packet whenever data is requested at a faster interval than the specified interval and data is not available."
+      // This can only be solved reliably if we load a ZLP after every IN transmission since we can not say if the host requests samples earlier than we declared! Once all samples are collected we overwrite the loaded ZLP.
+
+      // Check if there is data to load into EPs buffer - if not load it with ZLP
+      // Be aware - we as a device are not able to know if the host polls for data with a faster rate as we stated this in the descriptors. Therefore we always have to put something into the EPs buffer. However, once we did that, there is no way of aborting this or replacing what we put into the buffer before!
+      // This is the only place where we can fill something into the EPs buffer!
+
+      // Load new data
+      TU_VERIFY(audiod_tx_xfer_isr(rhport, audio));
+      return true;
+    }
+#endif
+
+#if CFG_TUD_AUDIO_ENABLE_EP_OUT
+
+    // New audio packet received
+    if (audio->ep_out == ep_addr)
+    {
+      TU_VERIFY(audiod_rx_xfer_isr(rhport, audio, (uint16_t) xferred_bytes));
+      return true;
+    }
+
 #endif
   }
 
