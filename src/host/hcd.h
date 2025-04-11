@@ -55,6 +55,7 @@
 //--------------------------------------------------------------------+
 typedef enum {
   HCD_EVENT_DEVICE_ATTACH,
+  HCD_EVENT_DEVICE_ATTACH_DEBOUNCING,
   HCD_EVENT_DEVICE_REMOVE,
   HCD_EVENT_XFER_COMPLETE,
 
