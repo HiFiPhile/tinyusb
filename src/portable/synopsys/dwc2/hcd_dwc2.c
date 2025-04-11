@@ -607,7 +607,7 @@ static bool channel_xfer_start(dwc2_regs_t* dwc2, uint8_t ch_id) {
       hcintmsk |= HCINT_BABBLE_ERR | HCINT_DATATOGGLE_ERR | HCINT_ACK;
     } else {
       hcintmsk |= HCINT_NYET;
-      if (edpt->hcsplt_bm.split_en) {
+      if (edpt->hcsplt_bm.split_en || hctsiz.do_ping) {
         hcintmsk |= HCINT_ACK;
       }
     }
@@ -1005,11 +1005,18 @@ static bool handle_channel_out_slave(dwc2_regs_t* dwc2, uint8_t ch_id, uint32_t 
   } else if (hcint & HCINT_ACK) {
     xfer->err_count = 0;
     channel->hcintmsk &= ~HCINT_ACK;
-    if (hcsplt.split_en && !hcsplt.split_compl) {
-      // start split is ACK --> do complete split
-      hcsplt.split_compl = 1;
-      channel->hcsplt = hcsplt.value;
-      channel->hcchar |= HCCHAR_CHENA;
+    if (hcsplt.split_en) {
+      if(!hcsplt.split_compl) {
+        // start split is ACK --> do complete split
+        hcsplt.split_compl = 1;
+        channel->hcsplt = hcsplt.value;
+        channel->hcchar |= HCCHAR_CHENA;
+      }
+    } else {
+      // Device is ready, resume transfer
+      edpt->do_ping = 0;
+      xfer->err_count = 0;
+      TU_ASSERT(channel_xfer_start(dwc2, ch_id));
     }
   }
 
