@@ -714,14 +714,19 @@ static void channel_xfer_in_retry(dwc2_regs_t* dwc2, uint8_t ch_id, uint32_t hci
       }
     }
 
-    // for periodic, de-allocate channel, enable SOF set frame counter for later transfer
-    edpt->next_pid = channel->hctsiz_bm.pid; // save PID
-    edpt->uframe_countdown = edpt->uframe_interval;
-    dwc2->gintmsk |= GINTSTS_SOF;
-
     if (hcint & HCINT_HALTED) {
-      // already halted, de-allocate channel (called from DMA isr)
-      channel_dealloc(dwc2, ch_id);
+      const uint32_t ucount = (hprt_speed_get(dwc2) == TUSB_SPEED_HIGH ? 1 : 8);
+      if (edpt->uframe_interval == ucount) {
+        // immediately retry if bInterval is 1
+        channel_xfer_start(dwc2, ch_id);
+      } else {
+        // otherwise, de-allocate channel, enable SOF set frame counter for later transfer
+        edpt->next_pid = channel->hctsiz_bm.pid; // save PID
+        edpt->uframe_countdown = edpt->uframe_interval - ucount;
+        dwc2->gintmsk |= GINTSTS_SOF;
+        // already halted, de-allocate channel (called from DMA isr)
+        channel_dealloc(dwc2, ch_id);
+      }
     } else {
       // disable channel first if not halted (called slave isr)
       xfer->halted_sof_schedule = 1;
