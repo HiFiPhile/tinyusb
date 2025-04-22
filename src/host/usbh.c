@@ -96,12 +96,7 @@ typedef struct {
   uint8_t rhport;
   uint8_t hub_addr;
   uint8_t hub_port;
-
-  struct TU_ATTR_PACKED {
-             uint8_t speed       : 4; // packed speed to save footprint
-    volatile uint8_t enumerating : 1; // enumeration is in progress, false if not connected or all interfaces are configured
-    uint8_t TU_RESERVED : 3;
-  };
+  uint8_t speed;
 } usbh_dev0_t;
 
 typedef struct {
@@ -117,7 +112,6 @@ typedef struct {
     volatile uint8_t addressed  : 1; // After SET_ADDR
     volatile uint8_t configured : 1; // After SET_CONFIG and all drivers are configured
     volatile uint8_t suspended  : 1; // Bus suspended
-
     // volatile uint8_t removing : 1; // Physically disconnected, waiting to be processed by usbh
   };
 
@@ -261,8 +255,6 @@ static inline usbh_class_driver_t const *get_driver(uint8_t drv_id) {
 // sum of end device + hub
 #define TOTAL_DEVICES   (CFG_TUH_DEVICE_MAX + CFG_TUH_HUB)
 
-static uint8_t _usbh_controller = TUSB_INDEX_INVALID_8;
-
 // Device with address = 0 for enumeration
 static usbh_dev0_t _dev0;
 
@@ -279,8 +271,7 @@ static usbh_device_t _usbh_devices[TOTAL_DEVICES];
   #define _usbh_mutex   NULL
 #endif
 
-// Event queue
-// usbh_int_set is used as mutex in OS NONE config
+// Event queue: usbh_int_set() is used as mutex in OS NONE config
 OSAL_QUEUE_DEF(usbh_int_set, _usbh_qdef, CFG_TUH_TASK_QUEUE_SZ, hcd_event_t);
 static osal_queue_t _usbh_q;
 
@@ -304,6 +295,15 @@ typedef struct {
 } usbh_epbuf_t;
 
 CFG_TUH_MEM_SECTION static usbh_epbuf_t _usbh_epbuf;
+
+typedef struct {
+  uint8_t controller_id; // controller ID
+  uint8_t enumerating_daddr; // device address of the device being enumerated
+} usbh_data_t;
+
+static usbh_data_t _usbh_data = {
+  .controller_id = TUSB_INDEX_INVALID_8,
+};
 
 //------------- Helper Function -------------//
 TU_ATTR_ALWAYS_INLINE static inline usbh_device_t* get_device(uint8_t dev_addr) {
@@ -340,7 +340,7 @@ bool tuh_mounted(uint8_t dev_addr) {
 
 bool tuh_connected(uint8_t daddr) {
   if (daddr == 0) {
-    return _dev0.enumerating; // dev0 is connected if still enumerating
+    return _usbh_data.enumerating_daddr == 0;
   } else {
     const usbh_device_t* dev = get_device(daddr);
     return dev && dev->connected;
@@ -365,7 +365,7 @@ tusb_speed_t tuh_speed_get(uint8_t dev_addr) {
 }
 
 bool tuh_rhport_is_active(uint8_t rhport) {
-  return _usbh_controller == rhport;
+  return _usbh_data.controller_id == rhport;
 }
 
 bool tuh_rhport_reset_bus(uint8_t rhport, bool active) {
@@ -393,7 +393,7 @@ static void clear_device(usbh_device_t* dev) {
 }
 
 bool tuh_inited(void) {
-  return _usbh_controller != TUSB_INDEX_INVALID_8;
+  return _usbh_data.controller_id != TUSB_INDEX_INVALID_8;
 }
 
 bool tuh_rhport_init(uint8_t rhport, const tusb_rhport_init_t* rh_init) {
@@ -433,6 +433,9 @@ bool tuh_rhport_init(uint8_t rhport, const tusb_rhport_init_t* rh_init) {
     tu_memclr(_usbh_devices, sizeof(_usbh_devices));
     tu_memclr(&_ctrl_xfer, sizeof(_ctrl_xfer));
 
+    _usbh_data.controller_id = TUSB_INDEX_INVALID_8;
+    _usbh_data.enumerating_daddr = TUSB_INDEX_INVALID_8;
+
     for (uint8_t i = 0; i < TOTAL_DEVICES; i++) {
       clear_device(&_usbh_devices[i]);
     }
@@ -448,7 +451,7 @@ bool tuh_rhport_init(uint8_t rhport, const tusb_rhport_init_t* rh_init) {
   }
 
   // Init host controller
-  _usbh_controller = rhport;
+  _usbh_data.controller_id = rhport;
   TU_ASSERT(hcd_init(rhport, rh_init));
   hcd_int_enable(rhport);
 
@@ -463,7 +466,7 @@ bool tuh_deinit(uint8_t rhport) {
   // deinit host controller
   hcd_int_disable(rhport);
   hcd_deinit(rhport);
-  _usbh_controller = TUSB_INDEX_INVALID_8;
+  _usbh_data.controller_id = TUSB_INDEX_INVALID_8;
 
   // "unplug" all devices on this rhport (hub_addr = 0, hub_port = 0)
   process_removing_device(rhport, 0, 0);
@@ -530,20 +533,19 @@ void tuh_task_ext(uint32_t timeout_ms, bool in_isr) {
 
     switch (event.event_id) {
       case HCD_EVENT_DEVICE_ATTACH:
-        // due to the shared control buffer, we must complete enumerating one device before enumerating another one.
+        // due to the shared control buffer, we must fully complete enumerating one device first.
         // TODO better to have an separated queue for newly attached devices
-        if (_dev0.enumerating) {
-          // Some device can cause multiple duplicated attach events
-          // drop current enumerating and start over for a proper port reset
-          if (event.rhport == _dev0.rhport && event.connection.hub_addr == _dev0.hub_addr &&
-              event.connection.hub_port == _dev0.hub_port) {
+        if (_usbh_data.enumerating_daddr != TUSB_INDEX_INVALID_8) {
+          if (event.rhport == _dev0.rhport &&
+              event.connection.hub_addr == _dev0.hub_addr && event.connection.hub_port == _dev0.hub_port) {
+            // Some device can cause multiple duplicated attach events
+            // drop current enumerating and start over for a proper port reset
             // abort/cancel current enumeration and start new one
             TU_LOG1("[%u:] USBH Device Attach (duplicated)\r\n", event.rhport);
             tuh_edpt_abort_xfer(0, 0);
             enum_new_device(&event);
           } else {
             TU_LOG_USBH("[%u:] USBH Defer Attach until current enumeration complete\r\n", event.rhport);
-
             bool is_empty = osal_queue_empty(_usbh_q);
             queue_event(&event, in_isr);
 
@@ -554,7 +556,7 @@ void tuh_task_ext(uint32_t timeout_ms, bool in_isr) {
           }
         } else {
           TU_LOG1("[%u:] USBH Device Attach\r\n", event.rhport);
-          _dev0.enumerating = 1;
+          _usbh_data.enumerating_daddr = 0;
           enum_new_device(&event);
         }
         break;
@@ -661,11 +663,28 @@ static void _control_blocking_complete_cb(tuh_xfer_t* xfer) {
   *((xfer_result_t*) xfer->user_data) = xfer->result;
 }
 
+TU_ATTR_ALWAYS_INLINE static inline void _control_set_xfer_stage(uint8_t stage) {
+  if (_ctrl_xfer.stage != stage) {
+    (void) osal_mutex_lock(_usbh_mutex, OSAL_TIMEOUT_WAIT_FOREVER);
+    _ctrl_xfer.stage = stage;
+    (void) osal_mutex_unlock(_usbh_mutex);
+  }
+}
+
+TU_ATTR_ALWAYS_INLINE static inline bool usbh_setup_send(uint8_t daddr, const uint8_t setup_packet[8]) {
+  const uint8_t rhport = usbh_get_rhport(daddr);
+  const bool ret = hcd_setup_send(rhport, daddr, setup_packet);
+  if (!ret) {
+    _control_set_xfer_stage(CONTROL_STAGE_IDLE);
+  }
+  return ret;
+}
+
 // TODO timeout_ms is not supported yet
 bool tuh_control_xfer (tuh_xfer_t* xfer) {
   TU_VERIFY(xfer->ep_addr == 0 && xfer->setup); // EP0 with setup packet
   const uint8_t daddr = xfer->daddr;
-  TU_VERIFY(tuh_connected(daddr)); // Check if device is still connected (enumerating for dev0)
+  TU_VERIFY(tuh_connected(daddr));
 
   // pre-check to help reducing mutex lock
   TU_VERIFY(_ctrl_xfer.stage == CONTROL_STAGE_IDLE);
@@ -687,15 +706,13 @@ bool tuh_control_xfer (tuh_xfer_t* xfer) {
   (void) osal_mutex_unlock(_usbh_mutex);
 
   TU_VERIFY(is_idle);
-  const uint8_t rhport = usbh_get_rhport(daddr);
-
   TU_LOG_USBH("[%u:%u] %s: ", rhport, daddr,
               (xfer->setup->bmRequestType_bit.type == TUSB_REQ_TYPE_STANDARD && xfer->setup->bRequest <= TUSB_REQ_SYNCH_FRAME) ?
                   tu_str_std_request[xfer->setup->bRequest] : "Class Request");
   TU_LOG_BUF_USBH(xfer->setup, 8);
 
   if (xfer->complete_cb) {
-    TU_ASSERT(hcd_setup_send(rhport, daddr, (uint8_t const *) &_usbh_epbuf.request));
+    TU_ASSERT(usbh_setup_send(daddr, (uint8_t const *) &_usbh_epbuf.request));
   }else {
     // blocking if complete callback is not provided
     // change callback to internal blocking, and result as user argument
@@ -705,7 +722,7 @@ bool tuh_control_xfer (tuh_xfer_t* xfer) {
     _ctrl_xfer.user_data   = (uintptr_t) &result;
     _ctrl_xfer.complete_cb = _control_blocking_complete_cb;
 
-    TU_ASSERT(hcd_setup_send(rhport, daddr, (uint8_t *) &_usbh_epbuf.request));
+    TU_ASSERT(usbh_setup_send(daddr, (uint8_t const *) &_usbh_epbuf.request));
 
     while (result == XFER_RESULT_INVALID) {
       // Note: this can be called within an callback ie. part of tuh_task()
@@ -743,7 +760,7 @@ static void _control_xfer_complete(uint8_t daddr, xfer_result_t result) {
     .user_data   = _ctrl_xfer.user_data
   };
 
-  _set_control_xfer_stage(CONTROL_STAGE_IDLE);
+  _control_set_xfer_stage(CONTROL_STAGE_IDLE);
 
   if (xfer_temp.complete_cb) {
     xfer_temp.complete_cb(&xfer_temp);
@@ -772,7 +789,7 @@ static bool usbh_control_xfer_cb (uint8_t daddr, uint8_t ep_addr, xfer_result_t 
         _ctrl_xfer.actual_len = 0; // reset actual_len
         (void) osal_mutex_unlock(_usbh_mutex);
 
-        TU_ASSERT(hcd_setup_send(rhport, daddr, (uint8_t const *) request));
+        TU_ASSERT(usbh_setup_send(daddr, (uint8_t const *) request));
       } else {
         TU_LOG_USBH("[%u:%u] Control FAILED, xferred_bytes = %" PRIu32 "\r\n", rhport, daddr, xferred_bytes);
         TU_LOG_BUF_USBH(request, 8);
@@ -785,8 +802,8 @@ static bool usbh_control_xfer_cb (uint8_t daddr, uint8_t ep_addr, xfer_result_t 
         case CONTROL_STAGE_SETUP:
           if (request->wLength) {
             // DATA stage: initial data toggle is always 1
-            _set_control_xfer_stage(CONTROL_STAGE_DATA);
-            TU_ASSERT( hcd_edpt_xfer(rhport, daddr, tu_edpt_addr(0, request->bmRequestType_bit.direction), _ctrl_xfer.buffer, request->wLength) );
+            _control_set_xfer_stage(CONTROL_STAGE_DATA);
+            TU_ASSERT(hcd_edpt_xfer(rhport, daddr, tu_edpt_addr(0, request->bmRequestType_bit.direction), _ctrl_xfer.buffer, request->wLength));
             return true;
           }
         TU_ATTR_FALLTHROUGH;
@@ -800,7 +817,7 @@ static bool usbh_control_xfer_cb (uint8_t daddr, uint8_t ep_addr, xfer_result_t 
         _ctrl_xfer.actual_len = (uint16_t) xferred_bytes;
 
         // ACK stage: toggle is always 1
-        _set_control_xfer_stage(CONTROL_STAGE_ACK);
+        _control_set_xfer_stage(CONTROL_STAGE_ACK);
         TU_ASSERT( hcd_edpt_xfer(rhport, daddr, tu_edpt_addr(0, 1 - request->bmRequestType_bit.direction), NULL, 0) );
         break;
 
@@ -862,7 +879,7 @@ bool tuh_edpt_abort_xfer(uint8_t daddr, uint8_t ep_addr) {
     // control transfer: only 1 control at a time, check if we are aborting the current one
     TU_VERIFY(daddr == _ctrl_xfer.daddr && _ctrl_xfer.stage != CONTROL_STAGE_IDLE);
     hcd_edpt_abort_xfer(rhport, daddr, ep_addr);
-    _set_control_xfer_stage(CONTROL_STAGE_IDLE); // reset control transfer state to idle
+    _control_set_xfer_stage(CONTROL_STAGE_IDLE); // reset control transfer state to idle
   } else {
     usbh_device_t* dev = get_device(daddr);
     TU_VERIFY(dev);
@@ -894,9 +911,9 @@ uint8_t *usbh_get_enum_buf(void) {
 void usbh_int_set(bool enabled) {
   // TODO all host controller if multiple are used since they shared the same event queue
   if (enabled) {
-    hcd_int_enable(_usbh_controller);
+    hcd_int_enable(_usbh_data.controller_id);
   } else {
-    hcd_int_disable(_usbh_controller);
+    hcd_int_disable(_usbh_data.controller_id);
   }
 }
 
@@ -905,7 +922,6 @@ void usbh_defer_func(osal_task_func_t func, void *param, bool in_isr) {
   event.event_id = USBH_EVENT_FUNC_CALL;
   event.func_call.func = func;
   event.func_call.param = param;
-
   queue_event(&event, in_isr);
 }
 
@@ -1042,7 +1058,6 @@ TU_ATTR_FAST_FUNC void hcd_event_handler(hcd_event_t const* event, bool in_isr) 
     case HCD_EVENT_DEVICE_REMOVE:
       // FIXME device remove from a hub need an HCD API for hcd to free up endpoint
       // mark device as removing to prevent further xfer before the event is processed in usbh task
-
       break;
 
     default: break;
@@ -1266,30 +1281,20 @@ TU_ATTR_ALWAYS_INLINE static inline bool is_hub_addr(uint8_t daddr) {
   return (CFG_TUH_HUB > 0) && (daddr > CFG_TUH_DEVICE_MAX);
 }
 
-//static void mark_removing_device_isr(uint8_t rhport, uint8_t hub_addr, uint8_t hub_port) {
-//  for (uint8_t dev_id = 0; dev_id < TOTAL_DEVICES; dev_id++) {
-//    usbh_device_t *dev = &_usbh_devices[dev_id];
-//    uint8_t const daddr = dev_id + 1;
-//
-//    // hub_addr = 0 means roothub, hub_port = 0 means all devices of downstream hub
-//    if (dev->rhport == rhport && dev->connected &&
-//        (hub_addr == 0 || dev->hub_addr == hub_addr) &&
-//        (hub_port == 0 || dev->hub_port == hub_port)) {
-//      if (is_hub_addr(daddr)) {
-//        // If the device itself is a usb hub, mark all downstream devices.
-//        // FIXME recursive calls
-//        mark_removing_device_isr(rhport, daddr, 0);
-//      }
-//
-//      dev->removing = 1;
-//    }
-//  }
-//}
-
 // a device unplugged from rhport:hub_addr:hub_port
 static void process_removing_device(uint8_t rhport, uint8_t hub_addr, uint8_t hub_port) {
+  // dev0 is unplugged
+  if ((_usbh_data.enumerating_daddr == 0) && (rhport == _dev0.rhport) &&
+      (hub_addr == _dev0.hub_addr) && (hub_port == _dev0.hub_port)) {
+    hcd_device_close(_dev0.rhport, 0);
+    if (_ctrl_xfer.daddr == 0) {
+      _control_set_xfer_stage(CONTROL_STAGE_IDLE);
+    }
+    _usbh_data.enumerating_daddr = TUSB_INDEX_INVALID_8;
+    return;
+  }
+
   //------------- find the all devices (star-network) under port that is unplugged -------------//
-  // TODO mark as disconnected in ISR, also handle dev0
   uint32_t removing_hubs = 0;
   do {
     for (uint8_t dev_id = 0; dev_id < TOTAL_DEVICES; dev_id++) {
@@ -1324,13 +1329,21 @@ static void process_removing_device(uint8_t rhport, uint8_t hub_addr, uint8_t hu
         clear_device(dev);
 
         // abort on-going control xfer on this device if any
-        if (_ctrl_xfer.daddr == daddr) _set_control_xfer_stage(CONTROL_STAGE_IDLE);
+        if (daddr == _ctrl_xfer.daddr) {
+          _control_set_xfer_stage(CONTROL_STAGE_IDLE);
+        }
+
+        if (daddr == _usbh_data.enumerating_daddr) {
+          _usbh_data.enumerating_daddr = TUSB_INDEX_INVALID_8;
+        }
       }
     }
 
-    // if removing a hub, we need to remove its downstream devices
+    // if removing a hub, we need to remove all of its downstream devices
     #if CFG_TUH_HUB
-    if (removing_hubs == 0) break;
+    if (removing_hubs == 0) {
+      break;
+    }
 
     // find a marked hub to process
     for (uint8_t h_id = 0; h_id < CFG_TUH_HUB; h_id++) {
@@ -1359,9 +1372,9 @@ static void process_removing_device(uint8_t rhport, uint8_t hub_addr, uint8_t hu
 //--------------------------------------------------------------------+
 
 enum {
-  ENUM_RESET_DELAY_MS = 50,       // USB specs: 10 to 50ms
-  ENUM_DEBOUNCING_DELAY_MS = 450, // when plug/unplug a device, physical connection can be bouncing and may
+  ENUM_DEBOUNCING_DELAY_MS = 200, // when plug/unplug a device, physical connection can be bouncing and may
                                   // generate a series of attach/detach event. This delay wait for stable connection
+  ENUM_RESET_DELAY_MS = 50,       // USB specs: 10 to 50ms
 };
 
 enum {
@@ -1405,7 +1418,7 @@ static void process_enumeration(tuh_xfer_t* xfer) {
 
     // retry if not reaching max attempt
     failed_count++;
-    bool retry = _dev0.enumerating && (failed_count < ATTEMPT_COUNT_MAX);
+    bool retry = (_usbh_data.enumerating_daddr != TUSB_INDEX_INVALID_8) && (failed_count < ATTEMPT_COUNT_MAX);
     if (retry) {
       tusb_time_delay_ms_api(ATTEMPT_DELAY_MS); // delay a bit
       TU_LOG1("Enumeration attempt %u/%u\r\n", failed_count+1, ATTEMPT_COUNT_MAX);
@@ -1415,7 +1428,6 @@ static void process_enumeration(tuh_xfer_t* xfer) {
     if (!retry) {
       enum_full_complete(); // complete as failed
     }
-
     return;
   }
   failed_count = 0;
@@ -1431,7 +1443,6 @@ static void process_enumeration(tuh_xfer_t* xfer) {
   switch (state) {
     #if CFG_TUH_HUB
     //case ENUM_HUB_GET_STATUS_1: break;
-
     case ENUM_HUB_CLEAR_RESET_1: {
       hub_port_status_response_t port_status;
       memcpy(&port_status, _usbh_epbuf.ctrl, sizeof(hub_port_status_response_t));
@@ -1496,14 +1507,12 @@ static void process_enumeration(tuh_xfer_t* xfer) {
       usbh_device_t* new_dev = get_device(new_addr);
       TU_ASSERT(new_dev,);
       new_dev->addressed = 1;
+      _usbh_data.enumerating_daddr = new_addr;
 
-      // Close device 0
-      hcd_device_close(_dev0.rhport, 0);
+      hcd_device_close(_dev0.rhport, 0); // close dev0
 
-      // open control pipe for new address
-      TU_ASSERT(usbh_edpt_control_open(new_addr, new_dev->ep0_size),);
+      TU_ASSERT(usbh_edpt_control_open(new_addr, new_dev->ep0_size),); // open new control endpoint
 
-      // Get full device descriptor
       TU_LOG_USBH("Get Device Descriptor\r\n");
       TU_ASSERT(tuh_descriptor_get_device(new_addr, _usbh_epbuf.ctrl, sizeof(tusb_desc_device_t),
                                           process_enumeration, ENUM_GET_STRING_LANGUAGE_ID_LEN),);
@@ -1522,8 +1531,7 @@ static void process_enumeration(tuh_xfer_t* xfer) {
       dev->i_serial = desc_device->iSerialNumber;
       dev->bNumConfigurations = desc_device->bNumConfigurations;
 
-      tuh_enum_descriptor_device_cb(daddr, desc_device);// callback
-
+      tuh_enum_descriptor_device_cb(daddr, desc_device); // callback
       tuh_descriptor_get_string_langid(daddr, _usbh_epbuf.ctrl, 2,
                                        process_enumeration, ENUM_GET_STRING_LANGUAGE_ID);
       break;
@@ -1688,7 +1696,17 @@ static bool enum_new_device(hcd_event_t* event) {
     }
 
     // connected directly to roothub
-    hcd_port_reset(_dev0.rhport);
+
+    // wait until device connection is stable TODO non blocking
+    tusb_time_delay_ms_api(ENUM_DEBOUNCING_DELAY_MS);
+
+    // device unplugged while delaying
+    if (!hcd_port_connect_status(_dev0.rhport)) {
+      enum_full_complete();
+      return true;
+    }
+
+    hcd_port_reset(_dev0.rhport); // reset device
 
     // Since we are in middle of rhport reset, frame number is not available yet.
     // need to depend on tusb_time_millis_api()
@@ -1911,7 +1929,7 @@ void usbh_driver_set_config_complete(uint8_t dev_addr, uint8_t itf_num) {
 
 static void enum_full_complete(void) {
   // mark enumeration as complete
-  _dev0.enumerating = 0;
+  _usbh_data.enumerating_daddr = TUSB_INDEX_INVALID_8;
 
 #if CFG_TUH_HUB
   if (_dev0.hub_addr) {
